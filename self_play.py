@@ -253,7 +253,7 @@ def select_random(list_):
     Faster than numpy.random.choice
     
     """
-    return list_[int(len(list_) * random.random())] 
+    return list_[math.floor(len(list_) * random.random())] 
 
 # Game independent
 class MCTS:
