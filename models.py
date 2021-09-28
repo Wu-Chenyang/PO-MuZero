@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 
 import torch
 
-
 class MuZeroNetwork:
     def __new__(cls, config):
         if config.network == "fullyconnected":

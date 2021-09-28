@@ -89,7 +89,10 @@ class ReplayBuffer:
             index_batch.append([game_id, game_pos])
             observation_batch.append(
                 game_history.get_stacked_observations(
-                    game_pos, self.config.stacked_observations
+                    game_pos, self.config.stacked_observations,
+                    self.config.observation_shape,
+                    self.config.partially_observable if hasattr(self.config, 'partially_observable') else False,
+                    len(self.config.players)
                 )
             )
             action_batch.append(actions)
@@ -336,7 +339,10 @@ class Reanalyse:
             if self.config.use_last_model_value:
                 observations = [
                     game_history.get_stacked_observations(
-                        i, self.config.stacked_observations
+                        i, self.config.stacked_observations,
+                        self.config.observation_shape,
+                        self.config.partially_observable if hasattr(self.config, 'partially_observable') else False,
+                        len(self.config.players)
                     )
                     for i in range(len(game_history.root_values))
                 ]

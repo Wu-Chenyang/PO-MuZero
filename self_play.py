@@ -131,15 +131,24 @@ class SelfPlay:
             while (
                 not done and len(game_history.action_history) <= self.config.max_moves
             ):
-                assert (
-                    len(numpy.array(observation).shape) == 3
-                ), f"Observation should be 3 dimensionnal instead of {len(numpy.array(observation).shape)} dimensionnal. Got observation of shape: {numpy.array(observation).shape}"
-                assert (
-                    numpy.array(observation).shape == self.config.observation_shape
-                ), f"Observation should match the observation_shape defined in MuZeroConfig. Expected {self.config.observation_shape} but got {numpy.array(observation).shape}."
+                if hasattr(self.config, 'partially_observable') and self.config.partially_observable:
+                    assert (
+                        len(observation) == len(self.config.players)
+                    ), f"The observation in partially observable game should be a tuple of observations for all players"
+                else:
+                    assert (
+                        len(numpy.array(observation).shape) == 3
+                    ), f"Observation should be 3 dimensionnal instead of {len(numpy.array(observation).shape)} dimensionnal. Got observation of shape: {numpy.array(observation).shape}"
+                    assert (
+                        numpy.array(observation).shape == self.config.observation_shape
+                    ), f"Observation should match the observation_shape defined in MuZeroConfig. Expected {self.config.observation_shape} but got {numpy.array(observation).shape}."
+
                 stacked_observations = game_history.get_stacked_observations(
                     -1,
                     self.config.stacked_observations,
+                    self.config.observation_shape,
+                    self.config.partially_observable if hasattr(self.config, 'partially_observable') else False,
+                    len(self.config.players)
                 )
 
                 # Choose the action
@@ -517,39 +526,86 @@ class GameHistory:
         else:
             self.root_values.append(None)
 
-    def get_stacked_observations(self, index, num_stacked_observations):
+    def construct_round_observation(self, observation_index, observation_shape, player, n_player):
+        round_observation = []
+        if observation_index - n_player < 0:
+            for i in reversed(range(observation_index + 1)):
+                if self.observation_history[i][player] is not None:
+                    round_observation.append(self.observation_history[i][player])
+            round_observation = numpy.concatenate(round_observation)
+            if round_observation.shape[0] < observation_shape[0]:
+                round_observation = numpy.concatenate(
+                    (
+                        round_observation,
+                        numpy.zeros((observation_shape[0] - round_observation.shape[0],) + observation_shape[1:])
+                    )
+                )
+
+        else:
+            for i in reversed(range(observation_index - n_player + 1, observation_index + 1)):
+                if self.observation_history[i][player] is not None:
+                    round_observation.append(self.observation_history[i][player])
+            round_observation = numpy.concatenate(round_observation)
+
+        assert round_observation.shape == observation_shape
+
+        return round_observation
+
+    def get_stacked_observations(self, index, num_stacked_observations, observation_shape, partially_observable, n_player):
         """
         Generate a new observation with the observation at the index position
         and num_stacked_observations past observations and actions stacked.
         """
         # Convert to positive index
         index = index % len(self.observation_history)
+        if partially_observable:
+            player = (self.to_play_history[index] + 1) % n_player
+            histories = [self.construct_round_observation(index, observation_shape, player, n_player), ]
 
-        stacked_observations = self.observation_history[index].copy()
-        for past_observation_index in reversed(
-            range(index - num_stacked_observations, index)
-        ):
-            if 0 <= past_observation_index:
-                previous_observation = numpy.concatenate(
-                    (
-                        self.observation_history[past_observation_index],
+            for i in range(num_stacked_observations):
+                index -= n_player
+                if index < 0:
+                    histories.append(
+                        [numpy.zeros(observation_shape[1:])],
+                    )
+                    histories.append(
+                        numpy.zeros(observation_shape),
+                    )
+                else:
+                    histories.append(
                         [
-                            numpy.ones_like(stacked_observations[0])
-                            * self.action_history[past_observation_index + 1]
+                            numpy.ones(observation_shape[1:])
+                            * self.action_history[index + 1]
                         ],
                     )
-                )
-            else:
-                previous_observation = numpy.concatenate(
-                    (
-                        numpy.zeros_like(self.observation_history[index]),
-                        [numpy.zeros_like(stacked_observations[0])],
+                    histories.append(
+                        self.construct_round_observation(index, observation_shape, player, n_player)
                     )
-                )
+        else:
+            histories = [self.observation_history[index].copy(),]
 
-            stacked_observations = numpy.concatenate(
-                (stacked_observations, previous_observation)
-            )
+            for past_observation_index in reversed(
+                range(index - num_stacked_observations, index)
+            ):
+                if 0 <= past_observation_index:
+                    histories.append(
+                        [
+                            numpy.ones(observation_shape[1:])
+                            * self.action_history[past_observation_index + 1]
+                        ]
+                    )
+                    histories.append(
+                        self.observation_history[past_observation_index],
+                    )
+                else:
+                    histories.append(
+                        [numpy.zeros(observation_shape[1:])],
+                    )
+                    histories.append(
+                        numpy.zeros(observation_shape),
+                    )
+
+        stacked_observations = numpy.concatenate(histories)
 
         return stacked_observations
 
