@@ -386,9 +386,8 @@ class MuZero:
             result = numpy.mean(
                 [
                     sum(
-                        reward
+                        reward if history.to_play_history[i - 1] == muzero_player else -reward
                         for i, reward in enumerate(history.reward_history)
-                        if history.to_play_history[i - 1] == muzero_player
                     )
                     for history in results
                 ]

@@ -166,19 +166,18 @@ class DiagnoseModel:
                 graph.edge(str(parent_id), str(node_id), constraint="false")
 
             if len(node.children) != 0:
-                best_visit_count = max(
-                    [child.visit_count for child in node.children.values()]
-                )
+                # Do not support decoupled nodes yet
+                best_visit_count = max(node.visit_counts)
             else:
                 best_visit_count = False
-            for action, child in node.children.items():
-                if child.visit_count != 0:
+            for ai, action in enumerate(node.actions):
+                if node.visit_counts[ai] != 0:
                     traverse(
-                        child,
+                        node.children[ai],
                         action,
                         node_id,
                         True
-                        if best_visit_count and child.visit_count == best_visit_count
+                        if best_visit_count and node.visit_counts[ai] == best_visit_count
                         else False,
                     )
 
@@ -214,26 +213,32 @@ class Trajectoryinfo:
             self.action_history.append(action)
         if reward is not None:
             self.reward_history.append(reward)
+        # This is slow and can be improved by preallocation
+        # Do not support decoupled nodes
         self.prior_policies.append(
             [
-                root.children[action].prior
-                if action in root.children.keys()
+                root.priors[root.actions.index(action)]
+                if action in root.actions
                 else numpy.NaN
                 for action in self.config.action_space
             ]
         )
+        # This is slow and can be improved by preallocation
+        # Do not support decoupled nodes
         self.policies_after_planning.append(
             [
-                root.children[action].visit_count / self.config.num_simulations
-                if action in root.children.keys()
+                root.visit_counts[root.actions.index(action)] / self.config.num_simulations
+                if action in root.actions
                 else numpy.NaN
                 for action in self.config.action_space
             ]
         )
+        # This is slow and can be improved by preallocation
+        # Do not support decoupled nodes
         self.values_after_planning.append(
             [
-                root.children[action].value()
-                if action in root.children.keys()
+                root.values[root.actions.index(action)]
+                if action in root.actions
                 else numpy.NaN
                 for action in self.config.action_space
             ]
@@ -244,10 +249,12 @@ class Trajectoryinfo:
             else new_prior_root_value
         )
         self.root_value_after_planning.append(root.value())
+        # This is slow and can be improved by preallocation
+        # Do not support decoupled nodes
         self.prior_rewards.append(
             [
-                root.children[action].reward
-                if action in root.children.keys()
+                root.children[root.actions.index(action)].reward
+                if action in root.actions
                 else numpy.NaN
                 for action in self.config.action_space
             ]

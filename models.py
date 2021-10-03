@@ -17,6 +17,8 @@ class MuZeroNetwork:
                 config.fc_representation_layers,
                 config.fc_dynamics_layers,
                 config.support_size,
+                config.simultaneous,
+                len(config.players),
             )
         elif config.network == "resnet":
             return MuZeroResidualNetwork(
@@ -33,6 +35,8 @@ class MuZeroNetwork:
                 config.resnet_fc_policy_layers,
                 config.support_size,
                 config.downsample,
+                config.simultaneous,
+                len(config.players),
             )
         else:
             raise NotImplementedError(
@@ -89,10 +93,13 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
         fc_representation_layers,
         fc_dynamics_layers,
         support_size,
+        simultaneous,
+        n_player,
     ):
         super().__init__()
         self.action_space_size = action_space_size
         self.full_support_size = 2 * support_size + 1
+        self.simultaneous = simultaneous
 
         self.representation_network = torch.nn.DataParallel(
             mlp(
@@ -108,7 +115,7 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
 
         self.dynamics_encoded_state_network = torch.nn.DataParallel(
             mlp(
-                encoding_size + self.action_space_size,
+                encoding_size + n_player * self.action_space_size if simultaneous else encoding_size + self.action_space_size,
                 fc_dynamics_layers,
                 encoding_size,
             )
@@ -145,12 +152,22 @@ class MuZeroFullyConnectedNetwork(AbstractNetwork):
 
     def dynamics(self, encoded_state, action):
         # Stack encoded_state with a game specific one hot encoded action (See paper appendix Network Architecture)
-        action_one_hot = (
-            torch.zeros((action.shape[0], self.action_space_size))
-            .to(action.device)
-            .float()
-        )
-        action_one_hot.scatter_(1, action.long(), 1.0)
+        if self.simultaneous:
+            action_one_hot = (
+                torch.zeros((action.shape[0], action.shape[-1] * self.action_space_size))
+                .to(action.device)
+                .float()
+            )
+            for i in range(action.shape[-1]):
+                action_one_hot.scatter_(1, i * self.action_space_size + action[:, i:i+1].long(), 1.0)
+        else:
+            action_one_hot = (
+                torch.zeros((action.shape[0], self.action_space_size))
+                .to(action.device)
+                .float()
+            )
+            action_one_hot.scatter_(1, action.long(), 1.0)
+
         x = torch.cat((encoded_state, action_one_hot), dim=1)
 
         next_encoded_state = self.dynamics_encoded_state_network(x)
@@ -353,20 +370,21 @@ class DynamicsNetwork(torch.nn.Module):
         self,
         num_blocks,
         num_channels,
+        action_channels,
         reduced_channels_reward,
         fc_reward_layers,
         full_support_size,
         block_output_size_reward,
     ):
         super().__init__()
-        self.conv = conv3x3(num_channels, num_channels - 1)
-        self.bn = torch.nn.BatchNorm2d(num_channels - 1)
+        self.conv = conv3x3(num_channels, num_channels - action_channels)
+        self.bn = torch.nn.BatchNorm2d(num_channels - action_channels)
         self.resblocks = torch.nn.ModuleList(
-            [ResidualBlock(num_channels - 1) for _ in range(num_blocks)]
+            [ResidualBlock(num_channels - action_channels) for _ in range(num_blocks)]
         )
 
         self.conv1x1_reward = torch.nn.Conv2d(
-            num_channels - 1, reduced_channels_reward, 1
+            num_channels - action_channels, reduced_channels_reward, 1
         )
         self.block_output_size_reward = block_output_size_reward
         self.fc = mlp(
@@ -444,8 +462,11 @@ class MuZeroResidualNetwork(AbstractNetwork):
         fc_policy_layers,
         support_size,
         downsample,
+        simultaneous,
+        n_player,
     ):
         super().__init__()
+        self.simultaneous = simultaneous
         self.action_space_size = action_space_size
         self.full_support_size = 2 * support_size + 1
         block_output_size_reward = (
@@ -491,7 +512,8 @@ class MuZeroResidualNetwork(AbstractNetwork):
         self.dynamics_network = torch.nn.DataParallel(
             DynamicsNetwork(
                 num_blocks,
-                num_channels + 1,
+                num_channels + n_player if simultaneous else num_channels + 1,
+                n_player if simultaneous else 1,
                 reduced_channels_reward,
                 fc_reward_layers,
                 self.full_support_size,
@@ -549,21 +571,37 @@ class MuZeroResidualNetwork(AbstractNetwork):
 
     def dynamics(self, encoded_state, action):
         # Stack encoded_state with a game specific one hot encoded action (See paper appendix Network Architecture)
-        action_one_hot = (
-            torch.ones(
-                (
-                    encoded_state.shape[0],
-                    1,
-                    encoded_state.shape[2],
-                    encoded_state.shape[3],
+        if self.simultaneous:
+            action_one_hot = (
+                torch.ones(
+                    (
+                        encoded_state.shape[0],
+                        action.shape[-1],
+                        encoded_state.shape[2],
+                        encoded_state.shape[3],
+                    )
                 )
+                .to(action.device)
+                .float()
             )
-            .to(action.device)
-            .float()
-        )
-        action_one_hot = (
-            action[:, :, None, None] * action_one_hot / self.action_space_size
-        )
+            action_one_hot *= action[:, :, None, None] / self.action_space_size
+        else:
+            action_one_hot = (
+                torch.ones(
+                    (
+                        encoded_state.shape[0],
+                        1,
+                        encoded_state.shape[2],
+                        encoded_state.shape[3],
+                    )
+                )
+                .to(action.device)
+                .float()
+            )
+            action_one_hot = (
+                action[:, :, None, None] * action_one_hot / self.action_space_size
+            )
+
         x = torch.cat((encoded_state, action_one_hot), dim=1)
         next_encoded_state, reward = self.dynamics_network(x)
 

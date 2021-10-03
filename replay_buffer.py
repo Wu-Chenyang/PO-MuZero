@@ -91,8 +91,9 @@ class ReplayBuffer:
                 game_history.get_stacked_observations(
                     game_pos, self.config.stacked_observations,
                     self.config.observation_shape,
-                    self.config.partially_observable if hasattr(self.config, 'partially_observable') else False,
-                    len(self.config.players)
+                    self.config.simultaneous,
+                    len(self.config.players),
+                    len(self.config.action_space),
                 )
             )
             action_batch.append(actions)
@@ -116,8 +117,22 @@ class ReplayBuffer:
                 weight_batch
             )
 
+        if self.config.simultaneous:
+            index_batch = index_batch * 2
+            observation_batch = numpy.array(observation_batch)
+            observation_batch = numpy.concatenate((observation_batch[:, 0], observation_batch[:, 1]))
+            action_batch = numpy.concatenate((action_batch, numpy.flip(action_batch, axis=-1)))
+            value_batch = numpy.concatenate((value_batch, -numpy.array(value_batch)))
+            reward_batch = numpy.concatenate((reward_batch, -numpy.array(reward_batch)))
+            policy_batch = numpy.array(policy_batch)
+            policy_batch = numpy.concatenate((policy_batch[:, :, 0, :], policy_batch[:, :, 1, :]))
+            gradient_scale_batch = gradient_scale_batch * 2
+            if self.config.PER:
+                weight_batch = numpy.concatenate((weight_batch, weight_batch))
+
         # observation_batch: batch, channels, height, width
         # action_batch: batch, num_unroll_steps+1
+        # action_batch: batch, num_unroll_steps+1, num_players In simultaneous move game
         # value_batch: batch, num_unroll_steps+1
         # reward_batch: batch, num_unroll_steps+1
         # policy_batch: batch, num_unroll_steps+1, len(action_space)
@@ -261,6 +276,19 @@ class ReplayBuffer:
         Generate targets for every unroll steps.
         """
         target_values, target_rewards, target_policies, actions = [], [], [], []
+        if self.config.simultaneous:
+            uniform_policy = [
+                numpy.full(len(child_visits), 1/len(child_visits))
+                for child_visits in game_history.child_visits[0]
+            ]
+            random_action = numpy.random.choice(self.config.action_space, len(game_history.action_history[0]))
+        else:
+            uniform_policy = [
+                1 / len(game_history.child_visits[0])
+                for _ in range(len(game_history.child_visits[0]))
+            ]
+            random_action = numpy.random.choice(self.config.action_space)
+
         for current_index in range(
             state_index, state_index + self.config.num_unroll_steps + 1
         ):
@@ -275,28 +303,17 @@ class ReplayBuffer:
                 target_values.append(0)
                 target_rewards.append(game_history.reward_history[current_index])
                 # Uniform policy
-                target_policies.append(
-                    [
-                        1 / len(game_history.child_visits[0])
-                        for _ in range(len(game_history.child_visits[0]))
-                    ]
-                )
+                target_policies.append(uniform_policy)
                 actions.append(game_history.action_history[current_index])
             else:
                 # States past the end of games are treated as absorbing states
                 target_values.append(0)
                 target_rewards.append(0)
                 # Uniform policy
-                target_policies.append(
-                    [
-                        1 / len(game_history.child_visits[0])
-                        for _ in range(len(game_history.child_visits[0]))
-                    ]
-                )
-                actions.append(numpy.random.choice(self.config.action_space))
+                target_policies.append(uniform_policy)
+                actions.append(random_action)
 
         return target_values, target_rewards, target_policies, actions
-
 
 @ray.remote
 class Reanalyse:
@@ -341,8 +358,9 @@ class Reanalyse:
                     game_history.get_stacked_observations(
                         i, self.config.stacked_observations,
                         self.config.observation_shape,
-                        self.config.partially_observable if hasattr(self.config, 'partially_observable') else False,
-                        len(self.config.players)
+                        self.config.simultaneous,
+                        len(self.config.players),
+                        len(self.config.action_space),
                     )
                     for i in range(len(game_history.root_values))
                 ]
@@ -352,10 +370,17 @@ class Reanalyse:
                     .float()
                     .to(next(self.model.parameters()).device)
                 )
+
+                if self.config.simultaneous:
+                    observations = torch.cat((observations[:, 0], observations[:, 1]))
+
                 values = models.support_to_scalar(
                     self.model.initial_inference(observations)[0],
                     self.config.support_size,
                 )
+                if self.config.simultaneous:
+                    steps = values.shape[0] // 2
+                    values = (values[:steps] - values[steps:]) / 2.0
                 game_history.reanalysed_predicted_root_values = (
                     torch.squeeze(values).detach().cpu().numpy()
                 )
